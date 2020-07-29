@@ -1,3 +1,7 @@
+![test](https://github.com/enarx/iocuddle/workflows/test/badge.svg)
+![lint](https://github.com/enarx/iocuddle/workflows/lint/badge.svg)
+![rust v1.36+](https://img.shields.io/badge/rustc-v1.36%2B-blue.svg)
+
 `iocuddle` is a library for building runtime-safe `ioctl()` interfaces.
 
 Existing approaches to interfacing with `ioctl`s from Rust rely on casting
