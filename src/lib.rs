@@ -284,7 +284,7 @@ impl<T> Ioctl<Read, &T> {
 
         r.try_into()
             .map_err(|_| Error::last_os_error())
-            .and_then(|x| Ok((x, out)))
+            .map(|x| (x, out))
     }
 }
 
