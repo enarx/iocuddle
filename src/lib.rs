@@ -52,7 +52,7 @@
 //!
 //! let mut file = std::fs::File::open("/dev/tty").unwrap_or_else(|_| std::process::exit(0));
 //!
-//! // This is the simplist ioctl call. The request number is provided via the
+//! // This is the simplest ioctl call. The request number is provided via the
 //! // Ioctl::classic() constructor. This ioctl reads a C integer from the
 //! // kernel by internally passing a reference to a c_int as the argument to
 //! // the ioctl. This c_int is returned in the Ok status of the ioctl Result.

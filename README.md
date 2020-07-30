@@ -1,3 +1,5 @@
+# iocuddle
+
 ![test](https://github.com/enarx/iocuddle/workflows/test/badge.svg)
 ![lint](https://github.com/enarx/iocuddle/workflows/lint/badge.svg)
 ![rust v1.36+](https://img.shields.io/badge/rustc-v1.36%2B-blue.svg)
@@ -54,7 +56,7 @@ use iocuddle::*;
 
 let mut file = std::fs::File::open("/dev/tty").unwrap_or_else(|_| std::process::exit(0));
 
-// This is the simplist ioctl call. The request number is provided via the
+// This is the simplest ioctl call. The request number is provided via the
 // Ioctl::classic() constructor. This ioctl reads a C integer from the
 // kernel by internally passing a reference to a c_int as the argument to
 // the ioctl. This c_int is returned in the Ok status of the ioctl Result.
@@ -136,4 +138,3 @@ const KVM_X86_SETUP_MCE: Ioctl<Write, &u64> = unsafe { KVM.write(0x9c) };
 
 For the kernel documentation of the ioctl process, see the following file
 in the kernel source tree: `Documentation/userspace-api/ioctl/ioctl-number.rst`
-
