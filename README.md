@@ -1,8 +1,9 @@
-# iocuddle
+[![Workflow Status](https://github.com/enarx/iocuddle/workflows/test/badge.svg)](https://github.com/enarx/iocuddle/actions?query=workflow%3A%22test%22)
+[![Average time to resolve an issue](https://isitmaintained.com/badge/resolution/enarx/iocuddle.svg)](https://isitmaintained.com/project/enarx/iocuddle "Average time to resolve an issue")
+[![Percentage of issues still open](https://isitmaintained.com/badge/open/enarx/iocuddle.svg)](https://isitmaintained.com/project/enarx/iocuddle "Percentage of issues still open")
+![Maintenance](https://img.shields.io/badge/maintenance-activly--developed-brightgreen.svg)
 
-![test](https://github.com/enarx/iocuddle/workflows/test/badge.svg)
-![lint](https://github.com/enarx/iocuddle/workflows/lint/badge.svg)
-![rust v1.36+](https://img.shields.io/badge/rustc-v1.36%2B-blue.svg)
+# iocuddle
 
 `iocuddle` is a library for building runtime-safe `ioctl()` interfaces.
 
@@ -14,13 +15,13 @@ In contrast, `iocuddle` attempts to move the unsafe code burden to `ioctl`
 definition. Once an `ioctl` is defined, all executions of that `ioctl` can
 be done within safe code.
 
-# Interfaces
+## Interfaces
 
 `iocuddle` aims to handle >=99% of the kernel's `ioctl` interfaces.
 However, we do not aim to handle all possible `ioctl` interfaces. We will
 outline the different `ioctl` interfaces below.
 
-## Classic Interfaces
+### Classic Interfaces
 
 Classic `ioctl` interfaces are those `ioctl`s which were created before
 the modern interfaces we will see below. They basically allowed the full
@@ -87,7 +88,7 @@ assert_eq!(TIOCSBRK.ioctl(&mut file).unwrap(), 0);
 assert_eq!(TIOCCBRK.ioctl(&mut file).unwrap(), 0);
 ```
 
-## Modern Interfaces
+### Modern Interfaces
 
 In order to alleviate the type-safety problem with the classic interfaces,
 the Linux kernel developed a new set of conventions for developing
@@ -97,10 +98,10 @@ Modern `ioctl` interfaces always take a single reference to a struct or
 integer and return `-1` on failure and `0` (or occasionally another
 positive integer) on success. The `ioctl` request number is constructed
 from four parameters:
-* a `group` (confusingly called `type` in the kernel macros)
-* a `nr` (number)
-* a `direction`
-* (the size of) a `type`
+  * a `group` (confusingly called `type` in the kernel macros)
+  * a `nr` (number)
+  * a `direction`
+  * (the size of) a `type`
 
 The `group` parameter is used as a namespace to group related `ioctl`s.
 It is an integer value.
@@ -134,7 +135,9 @@ const KVM_X86_GET_MCE_CAP_SUPPORTED: Ioctl<Read, &u64> = unsafe { KVM.read(0x9d)
 const KVM_X86_SETUP_MCE: Ioctl<Write, &u64> = unsafe { KVM.write(0x9c) };
 ```
 
-# Kernel Documentation
+## Kernel Documentation
 
 For the kernel documentation of the ioctl process, see the following file
 in the kernel source tree: `Documentation/userspace-api/ioctl/ioctl-number.rst`
+
+License: Apache-2.0
