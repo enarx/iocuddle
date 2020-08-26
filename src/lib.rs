@@ -140,7 +140,7 @@
 
 use core::convert::TryInto;
 use core::marker::PhantomData;
-use core::mem::size_of;
+use core::mem::{size_of, MaybeUninit};
 use core::ptr::null;
 
 use std::io::{Error, Result};
@@ -278,13 +278,13 @@ impl<T> Ioctl<Read, &T> {
     /// internal `ioctl()` call. Upon success, returns the raw (positive)
     /// return value and the instance of `T`.
     pub fn ioctl(self, fd: &impl AsRawFd) -> Result<(c_uint, T)> {
-        let mut out: T = unsafe { core::mem::MaybeUninit::zeroed().assume_init() };
+        let mut out: MaybeUninit<T> = MaybeUninit::uninit();
 
-        let r = unsafe { ioctl(fd.as_raw_fd(), self.0, &mut out as *mut _, null::<c_void>()) };
+        let r = unsafe { ioctl(fd.as_raw_fd(), self.0, out.as_mut_ptr(), null::<c_void>()) };
 
         r.try_into()
             .map_err(|_| Error::last_os_error())
-            .map(|x| (x, out))
+            .map(|x| (x, unsafe { out.assume_init() }))
     }
 }
 
