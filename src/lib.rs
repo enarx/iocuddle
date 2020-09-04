@@ -256,6 +256,30 @@ impl<D, T> Ioctl<D, T> {
     pub const unsafe fn classic(request: c_ulong) -> Self {
         Self(request, PhantomData)
     }
+
+    /// Lie about the ioctl direction or type
+    ///
+    /// This function should be avoided unless necessary.
+    ///
+    /// Sometimes kernel developers make mistakes and use the wrong macros
+    /// or types during their ioctl definitions. However, once merged these
+    /// form part of the userspace API and won't be broken. Therefore, we
+    /// need a way to use the `request` number with the incorrect type. This
+    /// function allows this.
+    ///
+    /// Whenever using this function, it would be wise to include a comment
+    /// with a link to the kernel's ioctl definition and explaining why the
+    /// definition is incorrect.
+    ///
+    /// # Safety
+    ///
+    /// For safety details, see [Ioctl::classic].
+    ///
+    /// Additionally, one should note that this function discards your normal
+    /// protections. So you need to make sure that you have it correct.
+    pub const unsafe fn lie<E, U>(self) -> Ioctl<E, U> {
+        Ioctl(self.0, PhantomData)
+    }
 }
 
 impl Ioctl<Read, c_void> {
