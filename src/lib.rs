@@ -176,14 +176,14 @@ impl Group {
 
     // This function implements the _IOC() macro found in the kernel tree at:
     // `include/uapi/asm-generic/ioctl.h`.
-    const unsafe fn make<'a, D, T>(self, nr: u8, dir: c_ulong) -> Ioctl<D, &'a T> {
+    const unsafe fn make<D, T>(self, nr: u8, dir: c_ulong, size: usize) -> Ioctl<D, T> {
         const SIZE_BITS: c_ulong = 14;
         const SIZE_MASK: c_ulong = (1 << SIZE_BITS) - 1;
 
         let mut req = dir;
 
         req <<= SIZE_BITS;
-        req |= size_of::<T>() as c_ulong & SIZE_MASK;
+        req |= size as c_ulong & SIZE_MASK;
 
         req <<= size_of::<Self>() * 8;
         req |= self.0 as c_ulong;
@@ -194,7 +194,27 @@ impl Group {
         Ioctl::classic(req)
     }
 
+    /// Define a new `ioctl` with an associated `type`
+    ///
+    /// This corresponds to the `_IO(type, nr)` macro.
+    ///
+    /// The `nr` argument is the allocated integer which uniquely
+    /// identifies this `ioctl` within the `Group`.
+    ///
+    /// # Safety
+    ///
+    /// For safety details, see [Ioctl::classic].
+    ///
+    /// It is important to note that this function can produce any style of
+    /// ioctl. It is in many ways similar to [Ioctl::classic], but with
+    /// namespacing.
+    pub const unsafe fn none<D, T>(self, nr: u8) -> Ioctl<D, T> {
+        self.make(nr, 0b00, 0)
+    }
+
     /// Define a new `Read` `ioctl` with an associated `type`
+    ///
+    /// This corresponds to the `_IOR(type, nr, size)` macro.
     ///
     /// The `nr` argument is the allocated integer which uniquely
     /// identifies this `ioctl` within the `Group`.
@@ -203,10 +223,12 @@ impl Group {
     ///
     /// For safety details, see [Ioctl::classic].
     pub const unsafe fn read<'a, T>(self, nr: u8) -> Ioctl<Read, &'a T> {
-        self.make(nr, 0b10)
+        self.make(nr, 0b10, size_of::<T>())
     }
 
     /// Define a new `Write` `ioctl` with an associated `type`
+    ///
+    /// This corresponds to the `_IOW(type, nr, size)` macro.
     ///
     /// The `nr` argument is the allocated integer which uniquely
     /// identifies this `ioctl` within the `Group`.
@@ -215,10 +237,12 @@ impl Group {
     ///
     /// For safety details, see [Ioctl::classic].
     pub const unsafe fn write<'a, T>(self, nr: u8) -> Ioctl<Write, &'a T> {
-        self.make(nr, 0b01)
+        self.make(nr, 0b01, size_of::<T>())
     }
 
     /// Define a new `WriteRead` `ioctl` with an associated `type`
+    ///
+    /// This corresponds to the `_IOWR(type, nr, size)` macro.
     ///
     /// The `nr` argument is the allocated integer which uniquely
     /// identifies this `ioctl` within the `Group`.
@@ -227,7 +251,7 @@ impl Group {
     ///
     /// For safety details, see [Ioctl::classic].
     pub const unsafe fn write_read<'a, T>(self, nr: u8) -> Ioctl<WriteRead, &'a T> {
-        self.make(nr, 0b11)
+        self.make(nr, 0b11, size_of::<T>())
     }
 }
 
@@ -369,6 +393,18 @@ mod test {
     use super::*;
 
     const KVMIO: Group = Group::new(0xAE);
+
+    #[test]
+    fn req() {
+        const KVM_CREATE_VM: Ioctl<Read, c_void> = unsafe { KVMIO.none(0x01) };
+
+        assert_eq!(KVM_CREATE_VM.0, 0xae01);
+
+        if let Ok(mut file) = std::fs::File::open("/dev/kvm") {
+            let fd: c_uint = KVM_CREATE_VM.ioctl(&mut file).unwrap();
+            assert!(fd > 0);
+        }
+    }
 
     #[test]
     fn req_r() {
