@@ -188,7 +188,7 @@ impl Group {
         req <<= size_of::<Self>() * 8;
         req |= self.0 as c_ulong;
 
-        req <<= size_of::<u8>() * 8;
+        req <<= u8::BITS;
         req |= nr as c_ulong;
 
         Ioctl::classic(req)
