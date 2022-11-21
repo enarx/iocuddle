@@ -4,6 +4,7 @@ version = "0.1.1"
 authors = ["Nathaniel McCallum <npmccallum@redhat.com>"]
 license = "Apache-2.0"
 edition = "2018"
+rust-version = "1.56"
 
 homepage = "https://github.com/enarx/iocuddle"
 repository = "https://github.com/enarx/iocuddle"
