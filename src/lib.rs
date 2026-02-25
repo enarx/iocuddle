@@ -44,17 +44,11 @@ mod platform {
     pub const WRITE: c_ulong = 4;
 }
 
-/// PA-RISC: same bit widths as standard but READ and WRITE are swapped
-#[cfg(target_arch = "parisc")]
-mod platform {
-    use std::os::raw::c_ulong;
-    pub const SIZEBITS: c_ulong = 14;
-    pub const NONE: c_ulong = 0;
-    pub const READ: c_ulong = 1;
-    pub const WRITE: c_ulong = 2;
-}
-
 /// Standard (asm-generic): x86, x86_64, arm, aarch64, riscv, s390x, etc.
+///
+/// Note: PA-RISC (parisc) has swapped READ/WRITE values but no Rust target
+/// exists for it, so it falls into this default. If a Rust parisc target is
+/// ever added, it will need its own cfg block (READ=1, WRITE=2).
 #[cfg(not(any(
     target_arch = "powerpc",
     target_arch = "powerpc64",
@@ -63,8 +57,7 @@ mod platform {
     target_arch = "mips64",
     target_arch = "mips64r6",
     target_arch = "sparc",
-    target_arch = "sparc64",
-    target_arch = "parisc"
+    target_arch = "sparc64"
 )))]
 mod platform {
     use std::os::raw::c_ulong;
