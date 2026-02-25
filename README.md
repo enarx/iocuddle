@@ -1,8 +1,3 @@
-[![Workflow Status](https://github.com/enarx/iocuddle/workflows/test/badge.svg)](https://github.com/enarx/iocuddle/actions?query=workflow%3A%22test%22)
-[![Average time to resolve an issue](https://isitmaintained.com/badge/resolution/enarx/iocuddle.svg)](https://isitmaintained.com/project/enarx/iocuddle "Average time to resolve an issue")
-[![Percentage of issues still open](https://isitmaintained.com/badge/open/enarx/iocuddle.svg)](https://isitmaintained.com/project/enarx/iocuddle "Percentage of issues still open")
-![Maintenance](https://img.shields.io/badge/maintenance-activly--developed-brightgreen.svg)
-
 # iocuddle
 
 `iocuddle` is a library for building runtime-safe `ioctl()` interfaces.
