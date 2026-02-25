@@ -130,6 +130,28 @@
 //! const KVM_X86_SETUP_MCE: Ioctl<Write, &u64> = unsafe { KVM.write(0x9c) };
 //! ```
 //!
+//!
+//! # Non standard architectures
+//!
+//! Most platforms have a similar encoding for the number and value of the direction
+//! bits (Read/Write/None) and the number of bits left for the size of the data.
+//! For this case there is the default `Group`.
+//! For other platforms with a 'unique' encoding there is the low level `GroupNonStd`
+//!
+//! Example for the 32bit powerpc platform:
+//! ```
+//! use std::os::raw::c_ulong;
+//! use iocuddle::*;
+//!
+//! const PPC32_SIZEBITS : c_ulong = 13;
+//! const PPC32_NONE     : c_ulong =  1;
+//! const PPC32_READ     : c_ulong =  2;
+//! const PPC32_WRITE    : c_ulong =  4;
+//!
+//! const TIO: GroupNonStd<PPC32_SIZEBITS,PPC32_NONE,PPC32_READ,PPC32_WRITE>  = GroupNonStd::new(b'T');
+//! const TIOCGETD: Ioctl<Read, &u32> = unsafe { TIO.read(0x24) };
+//! ```
+//!
 //! # Kernel Documentation
 //!
 //! For the kernel documentation of the ioctl process, see the following file
@@ -166,9 +188,9 @@ pub struct WriteRead(());
 /// chosen a distinct name to disambiguate from the `ioctl` argument type.
 #[derive(Copy, Clone, PartialEq, Eq)]
 #[repr(transparent)]
-pub struct Group(u8);
+pub struct GroupNonStd<const SIZEBITS: c_ulong, const NONMSK: c_ulong, const RDMSK: c_ulong, const WRMSK: c_ulong>(u8);
+impl<const SIZEBITS: c_ulong, const NONMSK: c_ulong, const RDMSK: c_ulong, const WRMSK: c_ulong> GroupNonStd<SIZEBITS,NONMSK,RDMSK,WRMSK> {
 
-impl Group {
     /// Create a new group for related `ioctl`s from its allocated number
     pub const fn new(value: u8) -> Self {
         Self(value)
@@ -177,18 +199,19 @@ impl Group {
     // This function implements the _IOC() macro found in the kernel tree at:
     // `include/uapi/asm-generic/ioctl.h`.
     const unsafe fn make<D, T>(self, nr: u8, dir: c_ulong, size: usize) -> Ioctl<D, T> {
-        const SIZE_BITS: c_ulong = 14;
-        const SIZE_MASK: c_ulong = (1 << SIZE_BITS) - 1;
+        const IOC_NRBITS     : usize = 8;
+        const IOC_TYPEBITS   : usize = 8;
+        let size_mask:       c_ulong = (1 << SIZEBITS) - 1;
 
         let mut req = dir;
 
-        req <<= SIZE_BITS;
-        req |= size as c_ulong & SIZE_MASK;
+        req <<= SIZEBITS;
+        req |= size as c_ulong & size_mask;
 
-        req <<= size_of::<Self>() * 8;
+        req <<= IOC_TYPEBITS;
         req |= self.0 as c_ulong;
 
-        req <<= u8::BITS;
+        req <<= IOC_NRBITS;
         req |= nr as c_ulong;
 
         Ioctl::classic(req)
@@ -209,7 +232,7 @@ impl Group {
     /// ioctl. It is in many ways similar to [Ioctl::classic], but with
     /// namespacing.
     pub const unsafe fn none<D, T>(self, nr: u8) -> Ioctl<D, T> {
-        self.make(nr, 0b00, 0)
+        self.make(nr, NONMSK, 0)
     }
 
     /// Define a new `Read` `ioctl` with an associated `type`
@@ -223,7 +246,7 @@ impl Group {
     ///
     /// For safety details, see [Ioctl::classic].
     pub const unsafe fn read<'a, T>(self, nr: u8) -> Ioctl<Read, &'a T> {
-        self.make(nr, 0b10, size_of::<T>())
+        self.make(nr, RDMSK, size_of::<T>())
     }
 
     /// Define a new `Write` `ioctl` with an associated `type`
@@ -237,7 +260,7 @@ impl Group {
     ///
     /// For safety details, see [Ioctl::classic].
     pub const unsafe fn write<'a, T>(self, nr: u8) -> Ioctl<Write, &'a T> {
-        self.make(nr, 0b01, size_of::<T>())
+        self.make(nr, WRMSK, size_of::<T>())
     }
 
     /// Define a new `WriteRead` `ioctl` with an associated `type`
@@ -251,9 +274,19 @@ impl Group {
     ///
     /// For safety details, see [Ioctl::classic].
     pub const unsafe fn write_read<'a, T>(self, nr: u8) -> Ioctl<WriteRead, &'a T> {
-        self.make(nr, 0b11, size_of::<T>())
+        self.make(nr, RDMSK|WRMSK, size_of::<T>())
     }
 }
+
+// seems to be the default for most platforms
+//const DEFAULT_DIRBITS  : c_ulong =  2; // DEFAULT_DIRBITS + DEFAULT_SIZEBITS = 16
+const DEFAULT_SIZEBITS : c_ulong =  14;
+const DEFAULT_NONE     : c_ulong =   0;
+const DEFAULT_READ     : c_ulong =   2;
+const DEFAULT_WRITE    : c_ulong =   1;
+
+/// backwards compatibility: set Group to be the previous defaults
+pub type Group = GroupNonStd<DEFAULT_SIZEBITS,DEFAULT_NONE,DEFAULT_READ,DEFAULT_WRITE>;
 
 /// A defined `ioctl` along with its associated `direction` and `type`
 #[derive(Copy, Clone, PartialEq, Eq)]
@@ -426,4 +459,25 @@ mod test {
 
         assert_eq!(KVM_PPC_ALLOCATE_HTAB.0, 0xc004_aea7);
     }
+
+    //const PPC32_DIRBITS: c_ulong =  3;
+    const PPC32_SIZEBITS : c_ulong = 13;
+    const PPC32_NONE     : c_ulong =  1;
+    const PPC32_READ     : c_ulong =  2;
+    const PPC32_WRITE    : c_ulong =  4;
+
+    #[test]
+    fn req_rd_ppc32() {
+        const TIO: GroupNonStd<PPC32_SIZEBITS,PPC32_NONE,PPC32_READ,PPC32_WRITE>  = GroupNonStd::new(0x54u8);
+        const TIOCGETD: Ioctl<Read, &u32> = unsafe { TIO.read(0x24) };
+        assert_eq!(TIOCGETD.0, 0x4004_5424);
+    }
+    #[test]
+    fn req_wr_ppc32() {
+        const TIO: GroupNonStd<PPC32_SIZEBITS,PPC32_NONE,PPC32_READ,PPC32_WRITE>  = GroupNonStd::new(0x54u8);
+        const TIOCSETD: Ioctl<Write, &u32> = unsafe { TIO.write(0x23) };
+        assert_eq!(TIOCSETD.0, 0x8004_5423);
+    }
+
+
 }
