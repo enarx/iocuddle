@@ -17,6 +17,63 @@ extern "C" {
     fn ioctl(fd: c_int, request: c_ulong, ...) -> c_int;
 }
 
+// Platform-specific ioctl encoding constants.
+//
+// Most architectures use the asm-generic defaults, but several override
+// the direction bits and size field width. These values are sourced from
+// the kernel's `arch/*/include/uapi/asm/ioctl.h` headers.
+//
+// See: https://github.com/torvalds/linux/blob/master/include/uapi/asm-generic/ioctl.h
+
+/// OSF/1-derived platforms: powerpc, mips, sparc, (alpha — no Rust target)
+#[cfg(any(
+    target_arch = "powerpc",
+    target_arch = "powerpc64",
+    target_arch = "mips",
+    target_arch = "mips32r6",
+    target_arch = "mips64",
+    target_arch = "mips64r6",
+    target_arch = "sparc",
+    target_arch = "sparc64"
+))]
+mod platform {
+    use std::os::raw::c_ulong;
+    pub const SIZEBITS: c_ulong = 13;
+    pub const NONE: c_ulong = 1;
+    pub const READ: c_ulong = 2;
+    pub const WRITE: c_ulong = 4;
+}
+
+/// PA-RISC: same bit widths as standard but READ and WRITE are swapped
+#[cfg(target_arch = "parisc")]
+mod platform {
+    use std::os::raw::c_ulong;
+    pub const SIZEBITS: c_ulong = 14;
+    pub const NONE: c_ulong = 0;
+    pub const READ: c_ulong = 1;
+    pub const WRITE: c_ulong = 2;
+}
+
+/// Standard (asm-generic): x86, x86_64, arm, aarch64, riscv, s390x, etc.
+#[cfg(not(any(
+    target_arch = "powerpc",
+    target_arch = "powerpc64",
+    target_arch = "mips",
+    target_arch = "mips32r6",
+    target_arch = "mips64",
+    target_arch = "mips64r6",
+    target_arch = "sparc",
+    target_arch = "sparc64",
+    target_arch = "parisc"
+)))]
+mod platform {
+    use std::os::raw::c_ulong;
+    pub const SIZEBITS: c_ulong = 14;
+    pub const NONE: c_ulong = 0;
+    pub const READ: c_ulong = 2;
+    pub const WRITE: c_ulong = 1;
+}
+
 /// A marker for the read direction
 pub struct Read(());
 
@@ -43,18 +100,19 @@ impl Group {
     // This function implements the _IOC() macro found in the kernel tree at:
     // `include/uapi/asm-generic/ioctl.h`.
     const unsafe fn make<D, T>(self, nr: u8, dir: c_ulong, size: usize) -> Ioctl<D, T> {
-        const SIZE_BITS: c_ulong = 14;
-        const SIZE_MASK: c_ulong = (1 << SIZE_BITS) - 1;
+        const NR_BITS: usize = 8;
+        const TYPE_BITS: usize = 8;
+        const SIZE_MASK: c_ulong = (1 << platform::SIZEBITS) - 1;
 
         let mut req = dir;
 
-        req <<= SIZE_BITS;
+        req <<= platform::SIZEBITS;
         req |= size as c_ulong & SIZE_MASK;
 
-        req <<= size_of::<Self>() * 8;
+        req <<= TYPE_BITS;
         req |= self.0 as c_ulong;
 
-        req <<= u8::BITS;
+        req <<= NR_BITS;
         req |= nr as c_ulong;
 
         Ioctl::classic(req)
@@ -75,7 +133,7 @@ impl Group {
     /// ioctl. It is in many ways similar to [Ioctl::classic], but with
     /// namespacing.
     pub const unsafe fn none<D, T>(self, nr: u8) -> Ioctl<D, T> {
-        self.make(nr, 0b00, 0)
+        self.make(nr, platform::NONE, 0)
     }
 
     /// Define a new `Read` `ioctl` with an associated `type`
@@ -89,7 +147,7 @@ impl Group {
     ///
     /// For safety details, see [Ioctl::classic].
     pub const unsafe fn read<'a, T>(self, nr: u8) -> Ioctl<Read, &'a T> {
-        self.make(nr, 0b10, size_of::<T>())
+        self.make(nr, platform::READ, size_of::<T>())
     }
 
     /// Define a new `Write` `ioctl` with an associated `type`
@@ -103,7 +161,7 @@ impl Group {
     ///
     /// For safety details, see [Ioctl::classic].
     pub const unsafe fn write<'a, T>(self, nr: u8) -> Ioctl<Write, &'a T> {
-        self.make(nr, 0b01, size_of::<T>())
+        self.make(nr, platform::WRITE, size_of::<T>())
     }
 
     /// Define a new `WriteRead` `ioctl` with an associated `type`
@@ -117,7 +175,7 @@ impl Group {
     ///
     /// For safety details, see [Ioctl::classic].
     pub const unsafe fn write_read<'a, T>(self, nr: u8) -> Ioctl<WriteRead, &'a T> {
-        self.make(nr, 0b11, size_of::<T>())
+        self.make(nr, platform::READ | platform::WRITE, size_of::<T>())
     }
 }
 
@@ -257,6 +315,9 @@ impl<T> Ioctl<WriteRead, &T> {
 #[cfg(test)]
 mod test {
     use super::*;
+
+    // These expected values assume the standard (asm-generic) platform
+    // encoding, which is correct for x86_64 CI runners.
 
     const KVMIO: Group = Group::new(0xAE);
 
