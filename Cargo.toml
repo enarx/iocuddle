@@ -17,3 +17,4 @@ categories = ["os", "api-bindings"]
 exclude = [".github/*"]
 
 [dependencies]
+zerocopy = "0.8"

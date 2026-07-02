@@ -6,12 +6,14 @@
 
 use core::convert::TryInto;
 use core::marker::PhantomData;
-use core::mem::{size_of, MaybeUninit};
+use core::mem::size_of;
 use core::ptr::null;
 
 use std::io::{Error, Result};
 use std::os::raw::{c_int, c_uint, c_ulong, c_void};
 use std::os::unix::io::AsRawFd;
+
+use zerocopy::{FromBytes, Immutable, IntoBytes};
 
 extern "C" {
     fn ioctl(fd: c_int, request: c_ulong, ...) -> c_int;
@@ -236,20 +238,23 @@ impl Ioctl<Read, c_void> {
     }
 }
 
-impl<T> Ioctl<Read, &T> {
+impl<T: FromBytes> Ioctl<Read, &T> {
     /// Issue an `ioctl` to read a file descriptor's metadata as type `T`.
     ///
     /// A zeroed instance of type `T` is passed as the first argument to the
     /// internal `ioctl()` call. Upon success, returns the raw (positive)
     /// return value and the instance of `T`.
+    ///
+    /// `T: FromBytes` lets us start from a zeroed, already-valid `T` rather
+    /// than uninitialized memory: if the underlying `ioctl()` fails to fully
+    /// initialize every byte on some success path, the result is stale
+    /// zeros in the untouched fields, not undefined behavior.
     pub fn ioctl(self, fd: &impl AsRawFd) -> Result<(c_uint, T)> {
-        let mut out: MaybeUninit<T> = MaybeUninit::uninit();
+        let mut out = T::new_zeroed();
 
-        let r = unsafe { ioctl(fd.as_raw_fd(), self.0, out.as_mut_ptr(), null::<c_void>()) };
+        let r = unsafe { ioctl(fd.as_raw_fd(), self.0, &mut out as *mut T, null::<c_void>()) };
 
-        r.try_into()
-            .map_err(|_| Error::last_os_error())
-            .map(|x| (x, unsafe { out.assume_init() }))
+        r.try_into().map_err(|_| Error::last_os_error()).map(|x| (x, out))
     }
 }
 
@@ -279,12 +284,16 @@ impl Ioctl<Write, c_int> {
     }
 }
 
-impl<T> Ioctl<Write, &T> {
+impl<T: IntoBytes + Immutable> Ioctl<Write, &T> {
     /// Issue an `ioctl` to modify a file descriptor
     ///
     /// A reference to an immutable instance of `T` is provided as the argument.
     ///
     /// On success, returns the (positive) return value.
+    ///
+    /// `T: IntoBytes + Immutable` guarantees no uninitialized padding is
+    /// exposed to the kernel and that no interior mutability could race the
+    /// read.
     pub fn ioctl(self, fd: &mut impl AsRawFd, data: &T) -> Result<c_uint> {
         let r = unsafe { ioctl(fd.as_raw_fd(), self.0, data as *const _, null::<c_void>()) };
 
@@ -292,12 +301,17 @@ impl<T> Ioctl<Write, &T> {
     }
 }
 
-impl<T> Ioctl<WriteRead, &T> {
+impl<T: FromBytes + IntoBytes + Immutable> Ioctl<WriteRead, &T> {
     /// Issue an `ioctl` to modify a file descriptor and read its metadata
     ///
     /// A reference to a mutable instance of `T` is provided as the argument.
     ///
     /// On success, returns the (positive) return value.
+    ///
+    /// `T: FromBytes + IntoBytes + Immutable`: the kernel may overwrite any
+    /// bytes of `T` during this call, and `data` remains a valid `&mut T`
+    /// that safe code can read afterward, so every bit pattern the kernel
+    /// could leave behind must be a legal `T`.
     pub fn ioctl(self, fd: &mut impl AsRawFd, data: &mut T) -> Result<c_uint> {
         let r = unsafe { ioctl(fd.as_raw_fd(), self.0, data as *mut _, null::<c_void>()) };
 
@@ -320,8 +334,8 @@ mod test {
 
         assert_eq!(KVM_CREATE_VM.0, 0xae01);
 
-        if let Ok(mut file) = std::fs::File::open("/dev/kvm") {
-            let fd: c_uint = KVM_CREATE_VM.ioctl(&mut file).unwrap();
+        if let Ok(file) = std::fs::File::open("/dev/kvm") {
+            let fd: c_uint = KVM_CREATE_VM.ioctl(&file).unwrap();
             assert!(fd > 0);
         }
     }
@@ -333,6 +347,32 @@ mod test {
         assert_eq!(KVM_X86_GET_MCE_CAP_SUPPORTED.0, 0x8008_ae9d);
     }
 
+    // `/dev/kvm`-gated tests above (`req`) only actually run on CI hosts with
+    // KVM enabled, which most hosted runners don't have — the `if let Ok`
+    // guard makes them silently skip rather than fail, but that also means
+    // they usually provide zero real coverage of the ioctl() call path.
+    // `FIONREAD` (`_IOR('f', 127, int)` on Linux) works on any regular file,
+    // no special device/hardware/permissions required, so this exercises
+    // `Ioctl<Read, &T>::ioctl()`'s `T::new_zeroed()` path (this impl no
+    // longer uses `MaybeUninit`/`assume_init`) against a real ioctl() call
+    // that's guaranteed to run everywhere this test suite does.
+    #[test]
+    fn req_r_runs_everywhere_via_fionread() {
+        const FIONREAD: Ioctl<Read, &c_int> = unsafe { Ioctl::classic(0x541B) };
+
+        let mut path = std::env::temp_dir();
+        path.push(format!("iocuddle-test-fionread-{}", std::process::id()));
+        std::fs::write(&path, b"hello").expect("write temp file");
+
+        let file = std::fs::File::open(&path).expect("open temp file");
+        let result = FIONREAD.ioctl(&file);
+        let _ = std::fs::remove_file(&path);
+
+        let (ret, available) = result.unwrap();
+        assert_eq!(ret, 0);
+        assert_eq!(available, 5);
+    }
+
     #[test]
     fn req_w() {
         const KVM_X86_SETUP_MCE: Ioctl<Write, &u64> = unsafe { KVMIO.write(0x9c) };
@@ -340,10 +380,90 @@ mod test {
         assert_eq!(KVM_X86_SETUP_MCE.0, 0x4008_ae9c);
     }
 
+    // Same rationale as `req_r_runs_everywhere_via_fionread`: `FIONBIO`
+    // (`_IOW('f', 126, int)` on Linux) sets O_NONBLOCK through any file
+    // descriptor and needs no special device, so it exercises
+    // `Ioctl<Write, &T>::ioctl()` for real everywhere this suite runs.
+    #[test]
+    fn req_w_runs_everywhere_via_fionbio() {
+        const FIONBIO: Ioctl<Write, &c_int> = unsafe { Ioctl::classic(0x5421) };
+
+        let mut path = std::env::temp_dir();
+        path.push(format!("iocuddle-test-fionbio-{}", std::process::id()));
+        std::fs::write(&path, b"hello").expect("write temp file");
+
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .open(&path)
+            .expect("open temp file");
+        let result = FIONBIO.ioctl(&mut file, &1);
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(result.unwrap(), 0);
+    }
+
     #[test]
     fn req_wr() {
         const KVM_PPC_ALLOCATE_HTAB: Ioctl<WriteRead, &u32> = unsafe { KVMIO.write_read(0xa7) };
 
         assert_eq!(KVM_PPC_ALLOCATE_HTAB.0, 0xc004_aea7);
+    }
+
+    // FIONREAD/FIONBIO above are legacy fixed-value ioctls, not composed via
+    // the kernel's _IOC macros (that's exactly why they need `Ioctl::classic`
+    // rather than `Group::read`/`Group::write`) — so despite exercising a
+    // real ioctl() call, they say nothing about whether `Group`'s own _IOC
+    // encoding logic is correct against a real syscall. Every other real
+    // call in this module (`req`/`req_r`/`req_w`/`req_wr` via `Group::none`/
+    // `read`/`write`/`write_read`) is `/dev/kvm`-gated and silently skips
+    // when unavailable, which is most CI hosts.
+    //
+    // `/dev/ptmx` closes that gap: it's needed for basic terminal support
+    // (spawning a subprocess with a pty, `ssh`, etc.), so it's present and
+    // world-accessible on essentially any real Linux host, unlike `/dev/kvm`
+    // which needs virtualization support. It exposes two genuinely
+    // _IOC-composed ioctls with no side effects worth avoiding:
+    // `TIOCGPTN = _IOR('T', 0x30, unsigned int)` and
+    // `TIOCSPTLCK = _IOW('T', 0x31, int)`. These hard-fail rather than
+    // silently skip if `/dev/ptmx` is missing — a Linux host without it is
+    // missing basic terminal support, which is worth surfacing as a real
+    // test failure, not hiding behind an `if let Ok`.
+    const PTY: Group = Group::new(0x54); // 'T', matches <asm-generic/ioctls.h>
+
+    // Linux's O_NOCTTY, hardcoded to avoid a libc dependency for one flag —
+    // same "documented raw magic value" style this crate already uses for
+    // ioctl numbers. Keeps opening /dev/ptmx from accidentally attaching it
+    // as this process's controlling terminal.
+    const O_NOCTTY: i32 = 0o400;
+
+    fn open_ptmx() -> std::fs::File {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(O_NOCTTY)
+            .open("/dev/ptmx")
+            .expect("/dev/ptmx should exist and be openable on any real Linux host")
+    }
+
+    #[test]
+    fn group_read_runs_everywhere_via_tiocgptn() {
+        const TIOCGPTN: Ioctl<Read, &u32> = unsafe { PTY.read(0x30) };
+        assert_eq!(TIOCGPTN.0, 0x8004_5430);
+
+        let file = open_ptmx();
+        let (ret, _ptn) = TIOCGPTN.ioctl(&file).unwrap();
+        assert_eq!(ret, 0);
+    }
+
+    #[test]
+    fn group_write_runs_everywhere_via_tiocsptlck() {
+        const TIOCSPTLCK: Ioctl<Write, &c_int> = unsafe { PTY.write(0x31) };
+        assert_eq!(TIOCSPTLCK.0, 0x4004_5431);
+
+        let mut file = open_ptmx();
+        // 0 unlocks the pty pair; harmless on a pty nothing else is using.
+        let ret = TIOCSPTLCK.ioctl(&mut file, &0).unwrap();
+        assert_eq!(ret, 0);
     }
 }
