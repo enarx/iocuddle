@@ -50,7 +50,7 @@ Otherwise, classic `ioctl` interfaces can be defined and used via the
 use std::os::raw::{c_void, c_int, c_uint};
 use iocuddle::*;
 
-let mut file = std::fs::File::open("/dev/tty").unwrap_or_else(|_| std::process::exit(0));
+let file = std::fs::File::open("/dev/tty").unwrap_or_else(|_| std::process::exit(0));
 
 // This is the simplest ioctl call. The request number is provided via the
 // Ioctl::classic() constructor. This ioctl reads a C integer from the
@@ -72,15 +72,15 @@ assert_eq!(TIOCINQ.ioctl(&file).unwrap(), (0 as c_uint, 0 as c_int));
 // integer returned from the raw ioctl(), unlike the previous example. It
 // is not the input argument type.
 const TCSBRK: Ioctl<Write, c_int> = unsafe { Ioctl::classic(0x5409) };
-assert_eq!(TCSBRK.ioctl(&mut file, 0).unwrap(), 0 as c_uint);
+assert_eq!(TCSBRK.ioctl(&file, 0).unwrap(), 0 as c_uint);
 
 // `iocuddle` can also support classic ioctls with no argument. These
 // always modify the file descriptor state, so the Write parameter is
 // used.
 const TIOCSBRK: Ioctl<Write, c_void> = unsafe { Ioctl::classic(0x5427) };
 const TIOCCBRK: Ioctl<Write, c_void> = unsafe { Ioctl::classic(0x5428) };
-assert_eq!(TIOCSBRK.ioctl(&mut file).unwrap(), 0);
-assert_eq!(TIOCCBRK.ioctl(&mut file).unwrap(), 0);
+assert_eq!(TIOCSBRK.ioctl(&file).unwrap(), 0);
+assert_eq!(TIOCCBRK.ioctl(&file).unwrap(), 0);
 ```
 
 ### Modern Interfaces

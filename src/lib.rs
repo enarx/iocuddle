@@ -93,7 +93,7 @@ use core::ptr::null;
 
 use std::io::{Error, Result};
 use std::os::raw::{c_int, c_uint, c_ulong, c_void};
-use std::os::unix::io::AsRawFd;
+use std::os::unix::io::{AsFd, AsRawFd};
 
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
@@ -475,8 +475,8 @@ impl Ioctl<Read, c_void> {
     /// No argument is supplied to the internal `ioctl()` call. The raw
     /// (positive) return value from the internal `ioctl()` call is returned
     /// on success.
-    pub fn ioctl(self, fd: &impl AsRawFd) -> Result<c_uint> {
-        let r = unsafe { ioctl(fd.as_raw_fd(), self.0, null::<c_void>()) };
+    pub fn ioctl(self, fd: impl AsFd) -> Result<c_uint> {
+        let r = unsafe { ioctl(fd.as_fd().as_raw_fd(), self.0, null::<c_void>()) };
 
         r.try_into().map_err(|_| Error::last_os_error())
     }
@@ -493,10 +493,11 @@ impl<T: FromBytes> Ioctl<Read, &T> {
     /// than uninitialized memory: if the underlying `ioctl()` fails to fully
     /// initialize every byte on some success path, the result is stale
     /// zeros in the untouched fields, not undefined behavior.
-    pub fn ioctl(self, fd: &impl AsRawFd) -> Result<(c_uint, T)> {
+    pub fn ioctl(self, fd: impl AsFd) -> Result<(c_uint, T)> {
         let mut out = T::new_zeroed();
 
-        let r = unsafe { ioctl(fd.as_raw_fd(), self.0, &mut out as *mut T, null::<c_void>()) };
+        let r =
+            unsafe { ioctl(fd.as_fd().as_raw_fd(), self.0, &mut out as *mut T, null::<c_void>()) };
 
         r.try_into().map_err(|_| Error::last_os_error()).map(|x| (x, out))
     }
@@ -508,8 +509,8 @@ impl Ioctl<Write, c_void> {
     /// No argument is provided.
     ///
     /// On success, returns the (positive) return value.
-    pub fn ioctl(self, fd: &mut impl AsRawFd) -> Result<c_uint> {
-        let r = unsafe { ioctl(fd.as_raw_fd(), self.0, null::<c_void>()) };
+    pub fn ioctl(self, fd: impl AsFd) -> Result<c_uint> {
+        let r = unsafe { ioctl(fd.as_fd().as_raw_fd(), self.0, null::<c_void>()) };
 
         r.try_into().map_err(|_| Error::last_os_error())
     }
@@ -521,8 +522,8 @@ impl Ioctl<Write, c_int> {
     /// A C-integer argument is provided.
     ///
     /// On success, returns the (positive) return value.
-    pub fn ioctl(self, fd: &mut impl AsRawFd, data: c_int) -> Result<c_uint> {
-        let r = unsafe { ioctl(fd.as_raw_fd(), self.0, data, null::<c_void>()) };
+    pub fn ioctl(self, fd: impl AsFd, data: c_int) -> Result<c_uint> {
+        let r = unsafe { ioctl(fd.as_fd().as_raw_fd(), self.0, data, null::<c_void>()) };
 
         r.try_into().map_err(|_| Error::last_os_error())
     }
@@ -538,8 +539,8 @@ impl<T: IntoBytes + Immutable> Ioctl<Write, &T> {
     /// `T: IntoBytes + Immutable` guarantees no uninitialized padding is
     /// exposed to the kernel and that no interior mutability could race the
     /// read.
-    pub fn ioctl(self, fd: &mut impl AsRawFd, data: &T) -> Result<c_uint> {
-        let r = unsafe { ioctl(fd.as_raw_fd(), self.0, data as *const _, null::<c_void>()) };
+    pub fn ioctl(self, fd: impl AsFd, data: &T) -> Result<c_uint> {
+        let r = unsafe { ioctl(fd.as_fd().as_raw_fd(), self.0, data as *const _, null::<c_void>()) };
 
         r.try_into().map_err(|_| Error::last_os_error())
     }
@@ -556,8 +557,8 @@ impl<T: FromBytes + IntoBytes + Immutable> Ioctl<WriteRead, &T> {
     /// bytes of `T` during this call, and `data` remains a valid `&mut T`
     /// that safe code can read afterward, so every bit pattern the kernel
     /// could leave behind must be a legal `T`.
-    pub fn ioctl(self, fd: &mut impl AsRawFd, data: &mut T) -> Result<c_uint> {
-        let r = unsafe { ioctl(fd.as_raw_fd(), self.0, data as *mut _, null::<c_void>()) };
+    pub fn ioctl(self, fd: impl AsFd, data: &mut T) -> Result<c_uint> {
+        let r = unsafe { ioctl(fd.as_fd().as_raw_fd(), self.0, data as *mut _, null::<c_void>()) };
 
         r.try_into().map_err(|_| Error::last_os_error())
     }
@@ -617,6 +618,31 @@ mod test {
         assert_eq!(available, 5);
     }
 
+    // Every other test in this module passes `&file` — which only proves
+    // this migration didn't regress the single most common calling
+    // pattern, since `&File` already satisfied the old `&impl AsRawFd`
+    // bound too. `impl AsFd`'s actual payoff is accepting things that
+    // never satisfied `AsRawFd` at all, like an owned `BorrowedFd` passed
+    // by value: `BorrowedFd` implements `AsFd` but not `AsRawFd` on
+    // stable, so this would fail to compile against the pre-migration
+    // signature.
+    #[test]
+    fn ioctl_accepts_borrowed_fd_directly() {
+        const FIONREAD: Ioctl<Read, &c_int> = unsafe { Ioctl::classic(0x541B) };
+
+        let mut path = std::env::temp_dir();
+        path.push(format!("iocuddle-test-fionread-asfd-{}", std::process::id()));
+        std::fs::write(&path, b"hello").expect("write temp file");
+
+        let file = std::fs::File::open(&path).expect("open temp file");
+        let result = FIONREAD.ioctl(file.as_fd());
+        let _ = std::fs::remove_file(&path);
+
+        let (ret, available) = result.unwrap();
+        assert_eq!(ret, 0);
+        assert_eq!(available, 5);
+    }
+
     #[test]
     fn req_w() {
         const KVM_X86_SETUP_MCE: Ioctl<Write, &u64> = unsafe { KVMIO.write(0x9c) };
@@ -636,11 +662,11 @@ mod test {
         path.push(format!("iocuddle-test-fionbio-{}", std::process::id()));
         std::fs::write(&path, b"hello").expect("write temp file");
 
-        let mut file = std::fs::OpenOptions::new()
+        let file = std::fs::OpenOptions::new()
             .read(true)
             .open(&path)
             .expect("open temp file");
-        let result = FIONBIO.ioctl(&mut file, &1);
+        let result = FIONBIO.ioctl(&file, &1);
         let _ = std::fs::remove_file(&path);
 
         assert_eq!(result.unwrap(), 0);
@@ -705,9 +731,9 @@ mod test {
         const TIOCSPTLCK: Ioctl<Write, &c_int> = unsafe { PTY.write(0x31) };
         assert_eq!(TIOCSPTLCK.0, 0x4004_5431);
 
-        let mut file = open_ptmx();
+        let file = open_ptmx();
         // 0 unlocks the pty pair; harmless on a pty nothing else is using.
-        let ret = TIOCSPTLCK.ioctl(&mut file, &0).unwrap();
+        let ret = TIOCSPTLCK.ioctl(&file, &0).unwrap();
         assert_eq!(ret, 0);
     }
 
