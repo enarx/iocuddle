@@ -13,7 +13,7 @@ use std::io::{Error, Result};
 use std::os::raw::{c_int, c_uint, c_ulong, c_void};
 use std::os::unix::io::AsRawFd;
 
-use zerocopy::{FromBytes, Immutable, IntoBytes};
+use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
 extern "C" {
     fn ioctl(fd: c_int, request: c_ulong, ...) -> c_int;
@@ -222,6 +222,168 @@ impl<D, T> Ioctl<D, T> {
     /// protections. So you need to make sure that you have it correct.
     pub const unsafe fn lie<E, U>(self) -> Ioctl<E, U> {
         Ioctl(self.0, PhantomData)
+    }
+}
+
+/// An embedded pointer field that the kernel only *reads* through.
+///
+/// Some `ioctl`s embed the address of a second buffer as a raw integer
+/// field (e.g. SCSI `SG_IO`'s `sg_io_hdr.dxferp`). A bare `u64` field
+/// carries no information about what it points to or how long that pointee
+/// needs to remain valid — see the "Requirements on `T`" section of the
+/// crate docs. `Ptr` closes that gap: it can only be constructed from a
+/// live `&'a U`, and threading `'a` through the struct that embeds it (and
+/// from there into the `&T`/`&mut T` passed to `Ioctl::ioctl`) makes ordinary
+/// borrow-checking forbid mutating or dropping the pointee for as long as
+/// the kernel might be reading through the address.
+///
+/// `#[repr(transparent)]` over a bare `u64`: the [`PhantomData`] tail is
+/// zero-sized, so this has the exact layout the kernel ABI expects for a
+/// pointer-as-integer field.
+///
+/// Implements [`zerocopy::FromBytes`], so a struct embedding this field can
+/// still be used with `Ioctl<Read, &T>`/`Ioctl<WriteRead, &T>`, not just
+/// `Write` — this matters in practice: x86's `KVM_MEMORY_ENCRYPT_OP`
+/// (`struct kvm_sev_cmd`), for instance, is `WriteRead` and reads a pointer
+/// field while only writing back into *other* fields, and confining such a
+/// `T` to `Write` would make `Ptr` unusable for it. This is sound only
+/// because `PhantomData<&'a U>`
+/// occupies zero bytes and is never dereferenced by this type — an
+/// arbitrary kernel-written `u64` in `addr` produces an inert value, not a
+/// dangling reference anyone can act on. **This is a load-bearing
+/// invariant, not an implementation detail**: neither `Ptr` nor [`PtrMut`]
+/// may ever gain a safe method that dereferences `addr` (e.g. a `get(&self)
+/// -> &U`) without redoing this soundness argument from scratch — that
+/// would turn a bytes-reconstructed instance into a genuinely dangerous
+/// one.
+///
+/// The borrow lasts exactly as long as this value does. `Ptr` only borrows
+/// its target shared (unlike [`PtrMut`]'s exclusive borrow), so reading the
+/// original binding is still fine, but mutating it while a `Ptr` derived
+/// from it is still alive is a borrow-check error:
+///
+/// ```compile_fail
+/// use iocuddle::Ptr;
+///
+/// let mut val: u32 = 42;
+/// let p = Ptr::new(&val);
+/// val = 1; // fails: `val` is still immutably borrowed by `p`
+/// let _ = p;
+/// ```
+///
+/// Not covered: an ioctl whose kernel side keeps using the address *after*
+/// this call returns (persistent buffer registration) needs an RAII
+/// registration/deregistration object, not this type — a borrow that ends
+/// when `.ioctl()` returns is the wrong shape for that case.
+#[repr(transparent)]
+#[derive(Copy, Clone, FromBytes, IntoBytes, Immutable, KnownLayout)]
+pub struct Ptr<'a, U> {
+    addr: u64,
+    _marker: PhantomData<&'a U>,
+}
+
+impl<'a, U: IntoBytes + Immutable> Ptr<'a, U> {
+    /// Build a pointer-as-integer field from a live reference.
+    ///
+    /// Not `const fn`: a pointer-to-integer cast of a genuine reference is
+    /// rejected even at `const fn` *definition* time ("pointers cannot be
+    /// cast to integers during const eval"), because the address doesn't
+    /// exist until the referent is placed in memory at runtime — this is a
+    /// hard restriction on the cast itself, not something that only bites
+    /// a caller who happens to invoke it from a const context. `Ptr` values
+    /// are always built just-in-time before a call, never as part of a
+    /// `const` `Ioctl` declaration, so this costs nothing in practice.
+    pub fn new(r: &'a U) -> Self {
+        Self {
+            addr: r as *const U as u64,
+            _marker: PhantomData,
+        }
+    }
+}
+
+/// An embedded pointer field that the kernel *writes* through, and the
+/// caller reads back afterward (e.g. `SG_IO`'s sense-buffer pointer).
+///
+/// Same layout and lifetime-carrying discipline as [`Ptr`], but for the
+/// output direction: constructed from `&'a mut U`, so no other Rust code
+/// can read or write the pointee while this value — and the `ioctl` call it
+/// participates in — is alive. Unlike [`Ptr`], this type does not implement
+/// `Copy`/`Clone`: duplicating a token that represents exclusive access to
+/// the kernel's write target is a footgun worth refusing to compile, even
+/// where it wouldn't immediately violate the borrow on the pointee.
+///
+/// `PtrMut::new` requires `U: FromBytes` (in addition to [`Ptr`]'s bounds)
+/// because the kernel may leave an arbitrary bit pattern in `*U` that the
+/// caller will read back as a `U` once the borrow ends. `PtrMut` itself
+/// implements [`zerocopy::FromBytes`] regardless of `U` — see [`Ptr`]'s docs
+/// for why that's sound (no accessor ever dereferences `addr`) and why it
+/// matters (it's what makes `Ptr`/`PtrMut` usable in `Read`/`WriteRead`
+/// ioctls, not just `Write`).
+///
+/// The borrow lasts exactly as long as this value does. Touching the
+/// original binding while a `PtrMut` derived from it is still alive is a
+/// borrow-check error:
+///
+/// ```compile_fail
+/// use iocuddle::PtrMut;
+///
+/// let mut val: u32 = 42;
+/// let p = PtrMut::new(&mut val);
+/// val = 1; // fails: `val` is still exclusively borrowed by `p`
+/// let _ = p;
+/// ```
+///
+/// Not `Clone`, so duplicating the token is a compile error, not just a
+/// clippy lint:
+///
+/// ```compile_fail
+/// use iocuddle::PtrMut;
+///
+/// let mut val: u32 = 42;
+/// let p = PtrMut::new(&mut val);
+/// let _p2 = p.clone(); // fails: no method named `clone`
+/// ```
+///
+/// And not `Copy`, so using it twice is a use-after-move error:
+///
+/// ```compile_fail
+/// use iocuddle::PtrMut;
+///
+/// let mut val: u32 = 42;
+/// let p = PtrMut::new(&mut val);
+/// let _moved = p;
+/// let _used_again = p; // fails: use of moved value
+/// ```
+///
+/// `Send`/`Sync` are derived structurally through the `PhantomData<&'a mut
+/// U>` marker, mirroring `&'a mut U`'s own rules exactly: `PtrMut<U>: Send`
+/// requires `U: Send`, regardless of `U: Sync`. `std::sync::MutexGuard` is
+/// `Sync` (if its contents are) but deliberately never `Send` (unlocking a
+/// mutex from a different thread than the one that locked it is unsound),
+/// so it's a type that actually distinguishes the correct rule from a
+/// plausible-looking wrong one:
+///
+/// ```compile_fail
+/// fn assert_send<T: Send>() {}
+/// assert_send::<iocuddle::PtrMut<'_, std::sync::MutexGuard<'_, u32>>>();
+/// // fails: MutexGuard is not Send, so neither is PtrMut wrapping one
+/// ```
+#[repr(transparent)]
+#[derive(FromBytes, IntoBytes, Immutable, KnownLayout)]
+pub struct PtrMut<'a, U> {
+    addr: u64,
+    _marker: PhantomData<&'a mut U>,
+}
+
+impl<'a, U: FromBytes + IntoBytes + Immutable> PtrMut<'a, U> {
+    /// Build a pointer-as-integer field from a live mutable reference.
+    ///
+    /// See [`Ptr::new`] for why this isn't `const fn`.
+    pub fn new(r: &'a mut U) -> Self {
+        Self {
+            addr: r as *mut U as u64,
+            _marker: PhantomData,
+        }
     }
 }
 
@@ -465,5 +627,97 @@ mod test {
         // 0 unlocks the pty pair; harmless on a pty nothing else is using.
         let ret = TIOCSPTLCK.ioctl(&mut file, &0).unwrap();
         assert_eq!(ret, 0);
+    }
+
+    #[test]
+    fn ptr_addr_matches_reference() {
+        let val: u32 = 42;
+        let expected = &val as *const u32 as u64;
+        let p = Ptr::new(&val);
+        assert_eq!(p.addr, expected);
+    }
+
+    #[test]
+    #[allow(clippy::clone_on_copy)] // deliberately exercising Clone, not just Copy
+    fn ptr_is_copy_and_clone() {
+        let val: u32 = 42;
+        let p = Ptr::new(&val);
+        let p2 = p; // Copy: `p` must still be usable afterward.
+        let p3 = p2.clone();
+        assert_eq!(p.addr, p2.addr);
+        assert_eq!(p2.addr, p3.addr);
+    }
+
+    #[test]
+    fn ptrmut_addr_matches_reference() {
+        let mut val: u32 = 42;
+        let expected = &mut val as *mut u32 as u64;
+        let p = PtrMut::new(&mut val);
+        assert_eq!(p.addr, expected);
+    }
+
+    fn assert_send<T: Send>() {}
+    fn assert_sync<T: Sync>() {}
+
+    #[test]
+    fn ptr_send_sync_mirrors_shared_reference() {
+        // u32: Sync, so &u32 (and therefore Ptr<'_, u32>) is both Send and Sync.
+        assert_send::<Ptr<'_, u32>>();
+        assert_sync::<Ptr<'_, u32>>();
+
+        // std::sync::MutexGuard is Sync but *not* Send — an asymmetric case
+        // that actually distinguishes "Ptr<U>: Send iff U: Sync" (correct)
+        // from a hypothetical "Ptr<U>: Send iff U: Send" (wrong): only the
+        // correct rule lets this line compile, since a lone `u32` target
+        // can't tell the two rules apart (u32 is both Send and Sync).
+        assert_send::<Ptr<'_, std::sync::MutexGuard<'_, u32>>>();
+        assert_sync::<Ptr<'_, std::sync::MutexGuard<'_, u32>>>();
+    }
+
+    #[test]
+    fn ptrmut_send_sync_mirrors_exclusive_reference() {
+        // u32: Send + Sync, so &mut u32 (and therefore PtrMut<'_, u32>) is
+        // both Send and Sync.
+        assert_send::<PtrMut<'_, u32>>();
+        assert_sync::<PtrMut<'_, u32>>();
+
+        // Same asymmetric target as above, for the Sync half: MutexGuard is
+        // Sync regardless of its own Send-ness, so this only compiles under
+        // the correct "PtrMut<U>: Sync iff U: Sync" rule.
+        assert_sync::<PtrMut<'_, std::sync::MutexGuard<'_, u32>>>();
+    }
+
+    // Locks in the fix: a struct embedding Ptr/PtrMut must satisfy every
+    // direction's bound, not just Write's — otherwise WriteRead ioctls that
+    // read a pointer field while only writing back into other fields (e.g.
+    // x86's KVM_MEMORY_ENCRYPT_OP / struct kvm_sev_cmd) would have no
+    // usable safe wrapper at all. Struct names denote which field type
+    // they embed, not which single direction is being asserted — every
+    // assertion below is applied to both.
+    #[test]
+    fn ptr_and_ptrmut_in_struct_support_every_direction() {
+        #[repr(C)]
+        #[derive(FromBytes, IntoBytes, Immutable, KnownLayout)]
+        struct PtrArg<'a> {
+            buf: Ptr<'a, [u8; 4]>,
+        }
+
+        #[repr(C)]
+        #[derive(FromBytes, IntoBytes, Immutable, KnownLayout)]
+        struct PtrMutArg<'a> {
+            out: PtrMut<'a, [u8; 4]>,
+        }
+
+        fn assert_read<T: FromBytes>() {}
+        fn assert_write<T: IntoBytes + Immutable>() {}
+        fn assert_write_read<T: FromBytes + IntoBytes + Immutable>() {}
+
+        assert_read::<PtrArg<'_>>();
+        assert_write::<PtrArg<'_>>();
+        assert_write_read::<PtrArg<'_>>();
+
+        assert_read::<PtrMutArg<'_>>();
+        assert_write::<PtrMutArg<'_>>();
+        assert_write_read::<PtrMutArg<'_>>();
     }
 }

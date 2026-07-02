@@ -17,4 +17,4 @@ categories = ["os", "api-bindings"]
 exclude = [".github/*"]
 
 [dependencies]
-zerocopy = "0.8"
+zerocopy = { version = "0.8", features = ["derive"] }
