@@ -1,6 +1,88 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #![doc = include_str!("../README.md")]
+//!
+//! ## Requirements on `T`
+//!
+//! [`Group::read`], [`Group::write`], [`Group::write_read`], [`Ioctl::classic`],
+//! and [`Ioctl::lie`] are `unsafe fn`s: they let you assert that a given
+//! `(nr, direction, size)` triple, and the argument type `T` paired with it,
+//! matches the kernel's real definition of that `ioctl`. Once that assertion
+//! has been made, the resulting `Ioctl<D, T>::ioctl()` call is safe to invoke
+//! — but only because it is checked against, and constrained by, two
+//! independent halves of a contract that `T` must uphold. Both halves are
+//! necessary; neither is sufficient on its own.
+//!
+//! **1. Representation (enforced by the compiler).** Depending on the
+//! direction, the kernel may write arbitrary bytes into `T`'s memory that
+//! safe Rust code will subsequently read back as a `T` value. This is only
+//! sound if every bit pattern the kernel could leave behind is a legal value
+//! of `T` — i.e. no enums, `bool`s, references, or other types with invalid
+//! bit patterns, and no padding bytes that would otherwise be exposed to the
+//! kernel uninitialized. The direction-specific `ioctl()` impls require
+//! [`zerocopy`]'s [`FromBytes`]/[`IntoBytes`]/[`Immutable`] traits precisely
+//! where the kernel reads from or writes into `T`, so this half of the
+//! contract is checked at compile time.
+//!
+//! **2. Construction (a convention this crate cannot check).** Representation
+//! safety alone does not stop *misuse*: a `T` with public fields could still
+//! be constructed with a value that's representation-valid but semantically
+//! wrong for the ioctl (an unterminated name string, an inconsistent length
+//! field), or — most importantly — a raw pointer-shaped field could be set to
+//! an address with no real allocation behind it. The convention is that `T`'s
+//! fields are private to the module that defines the `ioctl`, with the only
+//! public constructors/mutators being ones that cannot produce an invalid
+//! `T`. When a field is itself the address of a second buffer (common in
+//! ioctls like `SG_IO`'s `sg_io_hdr`), use [`Ptr`]/[`PtrMut`] for that field
+//! rather than a bare integer: their constructors can only be called with a
+//! genuine, currently-live Rust borrow of the target, and that borrow's
+//! lifetime is threaded through `T` into the `&T`/`&mut T` you pass to
+//! `.ioctl()`, so ordinary borrow-checking forbids touching the pointee
+//! anywhere else for as long as the kernel might be reading or writing
+//! through it.
+//!
+//! A minimal example combining both halves — a struct wrapping a
+//! pointer-shaped field, usable with `Ioctl<Read, &T>`, `Ioctl<Write, &T>`,
+//! and `Ioctl<WriteRead, &T>` alike:
+//!
+//! ```
+//! use iocuddle::Ptr;
+//! use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
+//!
+//! #[repr(C)]
+//! #[derive(FromBytes, IntoBytes, Immutable, KnownLayout)]
+//! struct MyArg<'a> {
+//!     buf: Ptr<'a, [u8; 16]>,
+//! }
+//! ```
+//!
+//! [`Ptr`]/[`PtrMut`] implement [`FromBytes`], so a struct embedding one
+//! isn't confined to the `Write` direction (an earlier version of this
+//! crate confined them exactly that way, which made them useless for
+//! `WriteRead` ioctls like x86's `KVM_MEMORY_ENCRYPT_OP`/`kvm_sev_cmd`,
+//! which reads a pointer field while only writing back into other fields
+//! of the same struct). See [`Ptr`]'s docs for why this is sound and the
+//! invariant it depends on.
+//!
+//! One real sharp edge: `zerocopy`'s derive macros prove a `#[repr(C)]`
+//! struct has no undefined padding bytes by reasoning about adjacent fields'
+//! sizes and alignments, and that reasoning is conservative for a foreign
+//! generic field type like `Ptr<'a, U>` — pairing a `Ptr`/`PtrMut` field
+//! with a plain sibling field in the same struct may require the derive
+//! macro's padding proof to fall back to demanding the sibling also be
+//! [`zerocopy::Unaligned`], or an explicit padding field. Reordering fields
+//! is *not* a real option for a struct that must byte-for-byte mirror a
+//! fixed kernel layout (like `SG_IO`'s `sg_io_hdr`) — an explicit padding
+//! field (or wrapping the plain field in a byte-oriented `Unaligned` type)
+//! is the only adjustment available when the kernel's own field order isn't
+//! friendly to this proof.
+//!
+//! Note what this contract does *not* cover: an ioctl whose kernel side
+//! retains and uses a pointer *after* the call returns (persistent buffer
+//! registration, as with some `io_uring` or KVM memory-region ioctls) needs
+//! an RAII registration/deregistration object, not a pointer wrapper — no
+//! synchronous borrow can correctly express "valid until explicitly
+//! revoked."
 #![deny(missing_docs)]
 #![deny(clippy::all)]
 
