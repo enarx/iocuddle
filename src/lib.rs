@@ -46,7 +46,7 @@
 //! and `Ioctl<WriteRead, &T>` alike:
 //!
 //! ```
-//! use iocuddle::Ptr;
+//! use iocuddle::{Ptr, Size};
 //! use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 //!
 //! #[repr(C)]
@@ -54,6 +54,8 @@
 //! struct MyArg<'a> {
 //!     buf: Ptr<'a, [u8; 16]>,
 //! }
+//!
+//! impl Size for MyArg<'_> {}
 //! ```
 //!
 //! [`Ptr`]/[`PtrMut`] implement [`FromBytes`], so a struct embedding one
@@ -160,6 +162,71 @@ pub struct Write(());
 /// A marker for the write/read direction
 pub struct WriteRead(());
 
+/// Size encoded in an `ioctl` request for an argument type.
+///
+/// Defaults to the full Rust size. Override [`SIZE`](Self::SIZE) when the
+/// kernel ABI encodes only a prefix; [`Ioctl::ioctl`] still passes the whole
+/// value. The typed [`Group`] constructors reject oversized values at compile
+/// time, including for calls outside a const context.
+///
+/// This trait is safe to implement: [`IntoBytes`] guarantees initialized object
+/// bytes, and the constructors constrain the encoded size to those bytes.
+///
+/// ```compile_fail
+/// use iocuddle::{Group, Ioctl, Read, Size};
+/// use zerocopy::{FromBytes, Immutable, IntoBytes};
+///
+/// #[derive(FromBytes, Immutable, IntoBytes)]
+/// struct OversizedClaim(u8);
+///
+/// impl Size for OversizedClaim {
+///     const SIZE: usize = 2;
+/// }
+///
+/// let _: Ioctl<Read, &OversizedClaim> = unsafe { Group::new(0).read(0) };
+/// ```
+///
+/// The size must also fit the platform's `ioctl` size field:
+///
+/// ```compile_fail
+/// use iocuddle::{Group, Ioctl, Read};
+///
+/// let _: Ioctl<Read, &[u8; 1 << 14]> = unsafe { Group::new(0).read(0) };
+/// ```
+pub trait Size: Sized + IntoBytes + Immutable {
+    /// Size encoded in the `ioctl` request number.
+    const SIZE: usize = size_of::<Self>();
+}
+
+macro_rules! impl_size {
+    ($($type:ty),+ $(,)?) => {
+        $(impl Size for $type {})+
+    };
+}
+
+impl_size!((), bool, char);
+impl_size!(u8, u16, u32, u64, u128, usize);
+impl_size!(i8, i16, i32, i64, i128, isize);
+impl_size!(f32, f64);
+
+impl<T: IntoBytes + Immutable, const N: usize> Size for [T; N] {}
+
+struct CheckedSize<T>(PhantomData<T>);
+
+impl<T: Size> CheckedSize<T> {
+    const VALUE: c_ulong = {
+        assert!(
+            T::SIZE <= size_of::<T>(),
+            "ioctl size exceeds its argument type"
+        );
+        assert!(
+            T::SIZE < 1usize << platform::SIZEBITS,
+            "ioctl size exceeds the platform size field"
+        );
+        T::SIZE as c_ulong
+    };
+}
+
 /// A collection of related `ioctl`s
 ///
 /// In the Linux kernel macros, this is called the `ioctl` `type`. We have
@@ -176,15 +243,14 @@ impl Group {
 
     // This function implements the _IOC() macro found in the kernel tree at:
     // `include/uapi/asm-generic/ioctl.h`.
-    const unsafe fn make<D, T>(self, nr: u8, dir: c_ulong, size: usize) -> Ioctl<D, T> {
+    const unsafe fn make<D, T>(self, nr: u8, dir: c_ulong, size: c_ulong) -> Ioctl<D, T> {
         const NR_BITS: usize = 8;
         const TYPE_BITS: usize = 8;
-        const SIZE_MASK: c_ulong = (1 << platform::SIZEBITS) - 1;
 
         let mut req = dir;
 
         req <<= platform::SIZEBITS;
-        req |= size as c_ulong & SIZE_MASK;
+        req |= size;
 
         req <<= TYPE_BITS;
         req |= self.0 as c_ulong;
@@ -223,8 +289,11 @@ impl Group {
     /// # Safety
     ///
     /// For safety details, see [Ioctl::classic].
-    pub const unsafe fn read<'a, T>(self, nr: u8) -> Ioctl<Read, &'a T> {
-        self.make(nr, platform::READ, size_of::<T>())
+    ///
+    /// The caller must ensure that [`Size::SIZE`] matches the kernel ABI for
+    /// this request.
+    pub const unsafe fn read<'a, T: Size + FromBytes>(self, nr: u8) -> Ioctl<Read, &'a T> {
+        self.make(nr, platform::READ, CheckedSize::<T>::VALUE)
     }
 
     /// Define a new `Write` `ioctl` with an associated `type`
@@ -237,8 +306,11 @@ impl Group {
     /// # Safety
     ///
     /// For safety details, see [Ioctl::classic].
-    pub const unsafe fn write<'a, T>(self, nr: u8) -> Ioctl<Write, &'a T> {
-        self.make(nr, platform::WRITE, size_of::<T>())
+    ///
+    /// The caller must ensure that [`Size::SIZE`] matches the kernel ABI for
+    /// this request.
+    pub const unsafe fn write<'a, T: Size>(self, nr: u8) -> Ioctl<Write, &'a T> {
+        self.make(nr, platform::WRITE, CheckedSize::<T>::VALUE)
     }
 
     /// Define a new `WriteRead` `ioctl` with an associated `type`
@@ -251,8 +323,18 @@ impl Group {
     /// # Safety
     ///
     /// For safety details, see [Ioctl::classic].
-    pub const unsafe fn write_read<'a, T>(self, nr: u8) -> Ioctl<WriteRead, &'a T> {
-        self.make(nr, platform::READ | platform::WRITE, size_of::<T>())
+    ///
+    /// The caller must ensure that [`Size::SIZE`] matches the kernel ABI for
+    /// this request.
+    pub const unsafe fn write_read<'a, T: Size + FromBytes>(
+        self,
+        nr: u8,
+    ) -> Ioctl<WriteRead, &'a T> {
+        self.make(
+            nr,
+            platform::READ | platform::WRITE,
+            CheckedSize::<T>::VALUE,
+        )
     }
 }
 
@@ -364,6 +446,8 @@ pub struct Ptr<'a, U> {
     _marker: PhantomData<&'a U>,
 }
 
+impl<U> Size for Ptr<'_, U> {}
+
 impl<'a, U: IntoBytes + Immutable> Ptr<'a, U> {
     /// Build a pointer-as-integer field from a live reference.
     ///
@@ -456,6 +540,8 @@ pub struct PtrMut<'a, U> {
     addr: u64,
     _marker: PhantomData<&'a mut U>,
 }
+
+impl<U> Size for PtrMut<'_, U> {}
 
 impl<'a, U: FromBytes + IntoBytes + Immutable> PtrMut<'a, U> {
     /// Build a pointer-as-integer field from a live mutable reference.
@@ -702,6 +788,32 @@ mod test {
         const KVM_PPC_ALLOCATE_HTAB: Ioctl<WriteRead, &u32> = unsafe { KVMIO.write_read(0xa7) };
 
         assert_eq!(KVM_PPC_ALLOCATE_HTAB.0, 0xc004_aea7);
+    }
+
+    #[test]
+    fn size_can_describe_an_inline_prefix() {
+        #[repr(C)]
+        #[derive(FromBytes, IntoBytes, Immutable)]
+        struct Extended {
+            header: u32,
+            trailing: [u8; 12],
+        }
+
+        impl Size for Extended {
+            const SIZE: usize = size_of::<u32>();
+        }
+
+        const READ_PREFIX: Ioctl<Read, &u32> = unsafe { KVMIO.read(0xa7) };
+        const READ_EXTENDED: Ioctl<Read, &Extended> = unsafe { KVMIO.read(0xa7) };
+        const WRITE_PREFIX: Ioctl<Write, &u32> = unsafe { KVMIO.write(0xa7) };
+        const WRITE_EXTENDED: Ioctl<Write, &Extended> = unsafe { KVMIO.write(0xa7) };
+        const WRITE_READ_PREFIX: Ioctl<WriteRead, &u32> = unsafe { KVMIO.write_read(0xa7) };
+        const WRITE_READ_EXTENDED: Ioctl<WriteRead, &Extended> = unsafe { KVMIO.write_read(0xa7) };
+
+        assert_eq!(READ_EXTENDED.0, READ_PREFIX.0);
+        assert_eq!(WRITE_EXTENDED.0, WRITE_PREFIX.0);
+        assert_eq!(WRITE_READ_EXTENDED.0, WRITE_READ_PREFIX.0);
+        assert!(size_of::<Extended>() > Extended::SIZE);
     }
 
     // FIONREAD/FIONBIO above are legacy fixed-value ioctls, not composed via
