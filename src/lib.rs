@@ -582,14 +582,7 @@ impl<T: FromBytes> Ioctl<Read, &T> {
     pub fn ioctl(self, fd: impl AsFd) -> Result<(c_uint, T)> {
         let mut out = T::new_zeroed();
 
-        let r = unsafe {
-            ioctl(
-                fd.as_fd().as_raw_fd(),
-                self.0,
-                &mut out as *mut T,
-                null::<c_void>(),
-            )
-        };
+        let r = unsafe { ioctl(fd.as_fd().as_raw_fd(), self.0, &mut out as *mut T) };
 
         r.try_into()
             .map_err(|_| Error::last_os_error())
@@ -617,7 +610,7 @@ impl Ioctl<Write, c_int> {
     ///
     /// On success, returns the (positive) return value.
     pub fn ioctl(self, fd: impl AsFd, data: c_int) -> Result<c_uint> {
-        let r = unsafe { ioctl(fd.as_fd().as_raw_fd(), self.0, data, null::<c_void>()) };
+        let r = unsafe { ioctl(fd.as_fd().as_raw_fd(), self.0, data) };
 
         r.try_into().map_err(|_| Error::last_os_error())
     }
@@ -634,14 +627,7 @@ impl<T: IntoBytes + Immutable> Ioctl<Write, &T> {
     /// exposed to the kernel and that no interior mutability could race the
     /// read.
     pub fn ioctl(self, fd: impl AsFd, data: &T) -> Result<c_uint> {
-        let r = unsafe {
-            ioctl(
-                fd.as_fd().as_raw_fd(),
-                self.0,
-                data as *const _,
-                null::<c_void>(),
-            )
-        };
+        let r = unsafe { ioctl(fd.as_fd().as_raw_fd(), self.0, data as *const _) };
 
         r.try_into().map_err(|_| Error::last_os_error())
     }
@@ -659,14 +645,7 @@ impl<T: FromBytes + IntoBytes + Immutable> Ioctl<WriteRead, &T> {
     /// that safe code can read afterward, so every bit pattern the kernel
     /// could leave behind must be a legal `T`.
     pub fn ioctl(self, fd: impl AsFd, data: &mut T) -> Result<c_uint> {
-        let r = unsafe {
-            ioctl(
-                fd.as_fd().as_raw_fd(),
-                self.0,
-                data as *mut _,
-                null::<c_void>(),
-            )
-        };
+        let r = unsafe { ioctl(fd.as_fd().as_raw_fd(), self.0, data as *mut _) };
 
         r.try_into().map_err(|_| Error::last_os_error())
     }
