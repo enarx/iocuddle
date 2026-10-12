@@ -432,7 +432,7 @@ impl<D, T> Ioctl<D, T> {
 /// let mut val: u32 = 42;
 /// let p = Ptr::new(&val);
 /// val = 1; // fails: `val` is still immutably borrowed by `p`
-/// let _ = p;
+/// drop(p);
 /// ```
 ///
 /// Not covered: an ioctl whose kernel side keeps using the address *after*
@@ -441,7 +441,7 @@ impl<D, T> Ioctl<D, T> {
 /// when `.ioctl()` returns is the wrong shape for that case.
 #[repr(transparent)]
 #[derive(Copy, Clone, FromBytes, IntoBytes, Immutable, KnownLayout)]
-pub struct Ptr<'a, U> {
+pub struct Ptr<'a, U: 'a> {
     addr: u64,
     _marker: PhantomData<&'a U>,
 }
@@ -496,7 +496,7 @@ impl<'a, U: IntoBytes + Immutable> Ptr<'a, U> {
 /// let mut val: u32 = 42;
 /// let p = PtrMut::new(&mut val);
 /// val = 1; // fails: `val` is still exclusively borrowed by `p`
-/// let _ = p;
+/// drop(p);
 /// ```
 ///
 /// Not `Clone`, so duplicating the token is a compile error, not just a
@@ -536,7 +536,7 @@ impl<'a, U: IntoBytes + Immutable> Ptr<'a, U> {
 /// ```
 #[repr(transparent)]
 #[derive(FromBytes, IntoBytes, Immutable, KnownLayout)]
-pub struct PtrMut<'a, U> {
+pub struct PtrMut<'a, U: 'a> {
     addr: u64,
     _marker: PhantomData<&'a mut U>,
 }
